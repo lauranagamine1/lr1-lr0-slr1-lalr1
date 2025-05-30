@@ -5,7 +5,6 @@ from collections import defaultdict
 EPSILON = 'ϵ'
 ENDMARKER = '$'
 
-# Solicita ruta de archivo si no se pasa por argumento
 def prompt_filepath():
     filepath = input("Ingresa la ruta del archivo de gramática (por ejemplo 'input.txt'): ")
     return filepath.strip()
@@ -14,7 +13,6 @@ class Grammar:
     def __init__(self, filepath):
         self.productions = defaultdict(list)
         self._parse_file(filepath)
-        # No terminales y terminales
         self.nonterminals = set(self.productions.keys())
         self.terminals = set()
         for rhss in self.productions.values():
@@ -22,13 +20,11 @@ class Grammar:
                 for sym in rhs:
                     if sym != EPSILON and sym not in self.nonterminals:
                         self.terminals.add(sym)
-        # Gramática aumentada
         self.start_symbol = next(iter(self.productions))
         self.augmented_start = self.start_symbol + "'"
         self.productions[self.augmented_start] = [[self.start_symbol]]
         self.nonterminals.add(self.augmented_start)
         self.terminals.add(ENDMARKER)
-        # FIRST y FOLLOW
         self.compute_first()
         self.compute_follow()
 
@@ -97,49 +93,91 @@ class Grammar:
                         else:
                             trailer = self.first[sym].copy()
 
-# NFA para generar AFN de gramática (cada producción genera una rama)
+# AFN/AFD mejorados: estados numerados, inicial/finales claros
 class NFA:
     def __init__(self):
         self.start = 0
-        self.next_state = 1
-        self.transitions = defaultdict(list)  # state -> list of (symbol, next_state)
+        self.transitions = defaultdict(list)
+        self.final_states = set()
+        self.state_count = 1  # for unique state ids
+
     def add_production(self, rhs):
         prev = self.start
         if rhs == [EPSILON]:
             self.transitions[prev].append((EPSILON, prev))
+            self.final_states.add(prev)
         else:
             for sym in rhs:
-                nxt = self.next_state; self.next_state += 1
+                nxt = self.state_count
+                self.state_count += 1
                 self.transitions[prev].append((sym, nxt))
                 prev = nxt
+            self.final_states.add(prev)
+
     def epsilon_closure(self, states):
-        stack = list(states); res = set(states)
+        stack = list(states)
+        res = set(states)
         while stack:
             p = stack.pop()
-            for sym,q in self.transitions[p]:
+            for sym, q in self.transitions[p]:
                 if sym == EPSILON and q not in res:
-                    res.add(q); stack.append(q)
+                    res.add(q)
+                    stack.append(q)
         return res
 
-# Determinización de AFN a AFD
 def determinize_nfa(nfa, symbols):
     start = frozenset(nfa.epsilon_closure({nfa.start}))
     D = {start: {}}
     queue = [start]
+    state_numbers = {start: 0}
+    final_states = set()
+    next_id = 1
     while queue:
         U = queue.pop(0)
+        if any(u in nfa.final_states for u in U):
+            final_states.add(state_numbers[U])
         for sym in symbols:
             if sym == EPSILON: continue
             moves = set()
             for p in U:
-                for s,q in nfa.transitions[p]:
-                    if s == sym: moves.add(q)
-            if not moves: continue
+                for s, q in nfa.transitions[p]:
+                    if s == sym:
+                        moves.add(q)
+            if not moves:
+                continue
             V = frozenset(nfa.epsilon_closure(moves))
-            D[U][sym] = V
             if V not in D:
-                D[V] = {}; queue.append(V)
-    return D
+                D[V] = {}
+                state_numbers[V] = next_id
+                if any(u in nfa.final_states for u in V):
+                    final_states.add(next_id)
+                next_id += 1
+                queue.append(V)
+            D[U][sym] = V
+    return D, state_numbers, final_states
+
+def print_nfa(nfa):
+    print("\n=== AFN ===")
+    print(f"Estado inicial: {nfa.start}")
+    print(f"Estados finales: {sorted(nfa.final_states)}")
+    for p in sorted(nfa.transitions):
+        for sym, q in nfa.transitions[p]:
+            print(f" {p} --{sym}--> {q}")
+
+def print_dfa(dfa, state_numbers, final_states):
+    print("\n=== AFD ===")
+    for U, trans in dfa.items():
+        st = state_numbers[U]
+        tipo = []
+        if st == 0: tipo.append("inicial")
+        if st in final_states: tipo.append("final")
+        tipo_txt = " ("+", ".join(tipo)+")" if tipo else ""
+        print(f"Estado {st}{tipo_txt}: {sorted(U)}")
+        for sym, V in trans.items():
+            print(f"  --{sym}--> Estado {state_numbers[V]}")
+
+# ... (El resto del código LR/SLR/LALR/LR1 y print_table igual que tu versión previa, sin cambios) ...
+# Inclúyelo igual después de aquí ↓
 
 # Objetos para LR(0)
 class LR0Item:
@@ -195,7 +233,6 @@ def build_table_LR0(grammar,C):
                 if it.lhs==grammar.augmented_start: action[i][ENDMARKER]=('acc',)
                 else:
                     idx=pid[(it.lhs,tuple(it.rhs))]
-                    # SLR usa follow
                     for t in grammar.follow[it.lhs]: action[i][t]=('r',idx)
         for A in grammar.nonterminals:
             j=C.index(goto0(I,A,grammar)) if goto0(I,A,grammar) else None
@@ -265,9 +302,7 @@ def build_table_LR1(grammar,C):
             if J: goto_tbl[i][A]=C.index(J)
     return action,goto_tbl,prods
 
-# Fusionar estados de LR1 para LALR
 from collections import OrderedDict
-
 def merge_LR1_to_LALR(C1):
     core_map=OrderedDict()
     for i,I in enumerate(C1):
@@ -280,21 +315,6 @@ def merge_LR1_to_LALR(C1):
         C2.append(merged)
         for i in idxs: state_map[i]=new_id
     return C2
-
-# Funciones de impresión
-
-def print_nfa(nfa):
-    print("\n=== AFN ===")
-    for p,trans in nfa.transitions.items():
-        for sym,q in trans:
-            print(f" {p} --{sym}--> {q}")
-
-def print_dfa(dfa):
-    print("\n=== AFD ===")
-    for U,trans in dfa.items():
-        print(f"Estado {set(U)}:")
-        for sym,V in trans.items():
-            print(f"  --{sym}--> {set(V)}")
 
 def print_table(action,goto_tbl,prods):
     print("\n=== Tabla de análisis ===")
@@ -314,9 +334,7 @@ def print_table(action,goto_tbl,prods):
     print("\nProducciones:")
     for idx,(A,rhs) in enumerate(prods): print(f" {idx}: {A} -> {' '.join(rhs)}")
 
-# Programa principal
 def main():
-    # Arg o input
     if len(sys.argv)>=2 and sys.argv[1] != '--test': filepath=sys.argv[1]
     else: filepath=prompt_filepath()
     try:
@@ -324,14 +342,13 @@ def main():
     except Exception as e:
         print(e); sys.exit(1)
     print(f"Gramática cargada desde '{filepath}'.")
-    # Generar AFN y AFD
-    nfa=NFA()
+    nfa = NFA()
     for rhss in grammar.productions.values():
-        for rhs in rhss: nfa.add_production(rhs)
+        for rhs in rhss:
+            nfa.add_production(rhs)
     print_nfa(nfa)
-    dfa=determinize_nfa(nfa,grammar.terminals)
-    print_dfa(dfa)
-    # Selección de análisis
+    dfa, state_numbers, final_states = determinize_nfa(nfa, grammar.terminals)
+    print_dfa(dfa, state_numbers, final_states)
     print("\nSelecciona análisis: 1) LR0 2) SLR1 3) LALR1 4) LR1")
     choice=input("Opción [1-4]: ")
     if choice=='1':
